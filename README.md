@@ -70,7 +70,7 @@ $$G_t = \sum_{k=0}^{\infty} \gamma^k \, r_{t+k+1}$$
 
 The optimal action-value function satisfies the Bellman optimality equation:
 
-$$Q^{*}(s, a) = \mathbb{E}\left[ r + \gamma \max_{a'} Q^{*}(s', a') \;\middle|\; s, a \right]$$
+$$Q^{\ast}(s, a) = \mathbb{E}\left[ r + \gamma \max_{a'} Q^{\ast}(s', a') \;\middle|\; s, a \right]$$
 
 ### 1.5 Q-Learning Update
 
@@ -104,7 +104,7 @@ Episode terminates when player dies, castle is destroyed, enemy is killed, or 50
 
 ### 1.8 Convergence
 
-Q-learning converges to $Q^{*}$ under the following conditions (Watkins & Dayan, 1992):
+Q-learning converges to $Q^{\ast}$ under the following conditions (Watkins & Dayan, 1992):
 
 1. All state-action pairs are visited infinitely often — guaranteed by $\varepsilon$-greedy with $\varepsilon > 0$
 2. Learning rate satisfies $\sum_t \alpha_t = \infty$ and $\sum_t \alpha_t^2 < \infty$ — we use constant $\alpha = 0.1$ which works in practice for finite MDPs
