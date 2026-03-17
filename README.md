@@ -8,7 +8,7 @@ The project starts with a simpler map and then moves to a substantially more cha
 
 ## Gameplay Demo
 
-Below is a sample greedy-policy rollout after training. In the repository, it is recommended to place the animation in a dedicated media folder such as `assets/` and reference it from there.
+Below is a sample greedy-policy rollout after training. In the repository, it is recommended to place the animation in a dedicated media folder such as `assets/` and reference it from there. 
 
 ![Winning episode demo](./imgs/q_learning_vs_enemy_rush_castle.gif)
 
