@@ -1,0 +1,16 @@
+{
+  "episodes": 2000,
+  "alpha": 0.15,
+  "gamma": 0.99,
+  "epsilon": 1.0,
+  "epsilon_min": 0.05,
+  "epsilon_decay": 0.9995,
+  "seed": 42,
+  "max_steps": 160,
+  "level_map_path": "levels/level_3.txt",
+  "artifacts_dir": "artifacts",
+  "state_mode": "tuple",
+  "checkpoint_every": 200,
+  "log_every": 25,
+  "win_rate_window": 100
+}
