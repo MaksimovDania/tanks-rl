@@ -1,150 +1,260 @@
-"""Training entry point for Battle City Q-learning agent."""
+from __future__ import annotations
 
 import argparse
 import csv
 import json
-import os
+import logging
 import random
+from collections import deque
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from statistics import mean
+from typing import Any, Hashable, Protocol
 
-from lib.env import BattleCityEnv
-from lib.agent import QLearningAgent
-from lib.evaluate import evaluate, save_eval
-from lib.plots import generate_plots
+import numpy as np
 
-# Random run name generator
-ADJECTIVES = [
-    "bold", "calm", "cool", "dark", "fast", "keen", "loud", "neat", "rare",
-    "warm", "wise", "wild", "lazy", "busy", "epic", "slim", "fair", "grim",
-]
-SCIENTISTS = [
-    "newton", "curie", "euler", "gauss", "tesla", "fermi", "dirac", "bohr",
-    "planck", "faraday", "pascal", "turing", "lorenz", "hubble", "kepler",
-]
+from agent import QLearningAgent, QLearningConfig
+from env import LevelBattleCityEnv
+from env_adapter import BattleCityEnvAdapter, StateIndexer
+
+logger = logging.getLogger(__name__)
+
+State = Hashable
+DEFAULT_STATE_BASES: tuple[int, ...] = (17, 17, 4, 4, 2, 2, 2, 2, 2, 5, 5)
+TRAIN_LOG_FIELDS: tuple[str, ...] = (
+    "episode",
+    "reward",
+    "win",
+    "win_rate",
+    "epsilon",
+    "steps",
+    "td_error_mean",
+    "q_table_states",
+)
 
 
-def make_run_name():
-    return f"{random.choice(ADJECTIVES)}_{random.choice(SCIENTISTS)}"
+class EnvAdapterProtocol(Protocol):
+    @property
+    def n_actions(self) -> int:
+        ...
+
+    def reset(self, seed: int | None = None) -> tuple[State, dict[str, Any]]:
+        ...
+
+    def step(self, action: int) -> tuple[State, float, bool, bool, dict[str, Any]]:
+        ...
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train Q-learning agent on Battle City")
-    parser.add_argument("--level", type=str, default="levels/1.txt", help="Path to level file")
-    parser.add_argument("--episodes", type=int, default=50000, help="Number of training episodes")
-    parser.add_argument("--max-steps", type=int, default=500, help="Max steps per episode")
-    parser.add_argument("--alpha", type=float, default=0.1, help="Learning rate")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--epsilon-start", type=float, default=1.0, help="Starting epsilon")
-    parser.add_argument("--epsilon-end", type=float, default=0.01, help="Final epsilon")
-    parser.add_argument("--epsilon-decay", type=int, default=None, help="Epsilon decay steps (default: 80%% of episodes)")
-    parser.add_argument("--eval-interval", type=int, default=1000, help="Evaluate every N episodes")
-    parser.add_argument("--run-name", type=str, default=None, help="Run name (auto-generated if not set)")
+@dataclass(slots=True, frozen=True)
+class TrainConfig:
+    episodes: int
+    alpha: float
+    gamma: float
+    epsilon: float
+    epsilon_min: float
+    epsilon_decay: float
+    seed: int
+    max_steps: int
+    level_map_path: Path
+    artifacts_dir: Path
+    state_mode: str
+    checkpoint_every: int
+    log_every: int
+    win_rate_window: int
+
+
+@dataclass(slots=True, frozen=True)
+class TrainRow:
+    episode: int
+    reward: float
+    win: int
+    win_rate: float
+    epsilon: float
+    steps: int
+    td_error_mean: float
+    q_table_states: int
+
+
+class CsvMetricLogger:
+    def __init__(self, csv_path: Path) -> None:
+        self.csv_path = csv_path
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.csv_path.open("w", encoding="utf-8", newline="") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=list(TRAIN_LOG_FIELDS))
+            writer.writeheader()
+
+    def append(self, row: TrainRow) -> None:
+        with self.csv_path.open("a", encoding="utf-8", newline="") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=list(TRAIN_LOG_FIELDS))
+            writer.writerow(asdict(row))
+
+
+def parse_args() -> TrainConfig:
+    parser = argparse.ArgumentParser(description="Train a tabular Q-learning agent for Battle City.")
+    parser.add_argument("--episodes", type=int, default=2_000)
+    parser.add_argument("--alpha", type=float, default=0.15)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--epsilon", type=float, default=1.0)
+    parser.add_argument("--epsilon-min", type=float, default=0.05)
+    parser.add_argument("--epsilon-decay", type=float, default=0.9995)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-steps", type=int, default=160)
+    parser.add_argument("--level-map-path", type=Path, required=True)
+    parser.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"))
+    parser.add_argument("--state-mode", choices=("tuple", "index"), default="tuple")
+    parser.add_argument("--checkpoint-every", type=int, default=200)
+    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--win-rate-window", type=int, default=100)
+
     args = parser.parse_args()
-
-    if args.epsilon_decay is None:
-        args.epsilon_decay = int(args.episodes * 0.8)
-
-    run_name = args.run_name or make_run_name()
-    run_dir = os.path.join("runs", run_name)
-    os.makedirs(os.path.join(run_dir, "plots"), exist_ok=True)
-
-    # Save config
-    config = vars(args)
-    config["run_name"] = run_name
-    with open(os.path.join(run_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=2)
-
-    print(f"Run: {run_name}")
-    print(f"Config: {config}")
-    print()
-
-    # Init
-    env = BattleCityEnv(level_path=args.level, max_steps=args.max_steps)
-    agent = QLearningAgent(
-        n_actions=6,
+    return TrainConfig(
+        episodes=args.episodes,
         alpha=args.alpha,
         gamma=args.gamma,
-        epsilon_start=args.epsilon_start,
-        epsilon_end=args.epsilon_end,
-        epsilon_decay_steps=args.epsilon_decay,
+        epsilon=args.epsilon,
+        epsilon_min=args.epsilon_min,
+        epsilon_decay=args.epsilon_decay,
+        seed=args.seed,
+        max_steps=args.max_steps,
+        level_map_path=args.level_map_path,
+        artifacts_dir=args.artifacts_dir,
+        state_mode=args.state_mode,
+        checkpoint_every=args.checkpoint_every,
+        log_every=args.log_every,
+        win_rate_window=args.win_rate_window,
     )
 
-    train_log_path = os.path.join(run_dir, "train_log.csv")
-    eval_log_path = os.path.join(run_dir, "eval_log.csv")
 
-    # Training CSV header
-    train_fields = [
-        "episode", "reward", "episode_length", "epsilon",
-        "mean_td_error", "mean_q_delta", "mean_q", "max_q", "std_q", "n_states",
-    ]
-    with open(train_log_path, "w", newline="") as f:
-        csv.DictWriter(f, fieldnames=train_fields).writeheader()
+def setup_logging(artifacts_dir: Path) -> None:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    log_path = artifacts_dir / "train.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
+    )
 
-    # Training loop
-    for ep in range(1, args.episodes + 1):
-        state, _ = env.reset()
-        total_reward = 0
-        steps = 0
+
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def save_config(config: TrainConfig) -> None:
+    config_path = config.artifacts_dir / "config.json"
+    payload: dict[str, Any] = asdict(config)
+    payload["level_map_path"] = str(config.level_map_path)
+    payload["artifacts_dir"] = str(config.artifacts_dir)
+    with config_path.open("w", encoding="utf-8") as file_obj:
+        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+
+
+def build_env_adapter(config: TrainConfig, episode_seed: int) -> EnvAdapterProtocol:
+    level_map_str = config.level_map_path.read_text(encoding="utf-8")
+    env = LevelBattleCityEnv(
+        level_map_str=level_map_str,
+        max_steps=config.max_steps,
+        seed=episode_seed,
+    )
+
+    state_indexer = StateIndexer(DEFAULT_STATE_BASES) if config.state_mode == "index" else None
+    return BattleCityEnvAdapter(env=env, state_indexer=state_indexer)
+
+
+def build_agent(config: TrainConfig, n_actions: int) -> QLearningAgent:
+    agent_config = QLearningConfig(
+        n_actions=n_actions,
+        alpha=config.alpha,
+        gamma=config.gamma,
+        epsilon=config.epsilon,
+        epsilon_min=config.epsilon_min,
+        epsilon_decay=config.epsilon_decay,
+        seed=config.seed,
+    )
+    return QLearningAgent(agent_config)
+
+
+def train(config: TrainConfig) -> None:
+    setup_logging(config.artifacts_dir)
+    set_global_seed(config.seed)
+    save_config(config)
+
+    metrics_logger = CsvMetricLogger(config.artifacts_dir / "train_log.csv")
+    win_window: deque[int] = deque(maxlen=config.win_rate_window)
+
+    bootstrap_adapter = build_env_adapter(config, episode_seed=config.seed)
+    agent = build_agent(config, n_actions=bootstrap_adapter.n_actions)
+
+    logger.info("Training started: episodes=%d, state_mode=%s", config.episodes, config.state_mode)
+
+    for episode in range(1, config.episodes + 1):
+        adapter = build_env_adapter(config, episode_seed=config.seed + episode)
+        state, _ = adapter.reset(seed=config.seed + episode)
 
         done = False
+        episode_reward = 0.0
+        steps = 0
+        td_errors: list[float] = []
+        info: dict[str, Any] = {}
+
         while not done:
-            action = agent.act(state)
-            next_state, reward, terminated, truncated, info = env.step(action)
-            agent.update(state, action, reward, next_state, terminated or truncated)
+            action = agent.get_action(state)
+            next_state, reward, terminated, truncated, info = adapter.step(action)
+            td_error = agent.update(
+                state=state,
+                action=action,
+                reward=float(reward),
+                next_state=next_state,
+                done=bool(terminated or truncated),
+            )
+            td_errors.append(abs(td_error))
+
             state = next_state
-            total_reward += reward
+            episode_reward += float(reward)
             steps += 1
-            done = terminated or truncated
+            done = bool(terminated or truncated)
 
-        agent.decay_epsilon(ep)
+        agent.decay_epsilon()
 
-        # Log training stats
-        ep_stats = agent.get_episode_stats()
-        q_stats = agent.get_q_stats()
-        row = {
-            "episode": ep,
-            "reward": total_reward,
-            "episode_length": steps,
-            "epsilon": agent.epsilon,
-            "mean_td_error": ep_stats["mean_td_error"],
-            "mean_q_delta": ep_stats["mean_q_delta"],
-            "mean_q": q_stats["mean_q"],
-            "max_q": q_stats["max_q"],
-            "std_q": q_stats["std_q"],
-            "n_states": q_stats["n_states"],
-        }
-        with open(train_log_path, "a", newline="") as f:
-            csv.DictWriter(f, fieldnames=train_fields).writerow(row)
+        win = int(bool(info.get("win", False)))
+        win_window.append(win)
+        row = TrainRow(
+            episode=episode,
+            reward=episode_reward,
+            win=win,
+            win_rate=float(mean(win_window)) if win_window else 0.0,
+            epsilon=agent.epsilon,
+            steps=steps,
+            td_error_mean=float(mean(td_errors)) if td_errors else 0.0,
+            q_table_states=agent.num_states(),
+        )
+        metrics_logger.append(row)
 
-        # Periodic eval + console print
-        if ep % args.eval_interval == 0:
-            metrics = evaluate(env, agent, n_episodes=100, seed=42)
-            save_eval(metrics, ep, eval_log_path)
-
-            print(
-                f"Ep {ep:6d} | "
-                f"WinRate: {metrics['win_rate']:.2f} | "
-                f"AvgReward: {total_reward:7.1f} | "
-                f"AvgLen: {metrics['avg_episode_length']:5.0f} | "
-                f"TDErr: {ep_stats['mean_td_error']:.3f} | "
-                f"QDelta: {ep_stats['mean_q_delta']:.3f} | "
-                f"States: {q_stats['n_states']} | "
-                f"ε: {agent.epsilon:.3f}"
+        if episode % config.log_every == 0 or episode == 1 or episode == config.episodes:
+            logger.info(
+                "episode=%d reward=%.3f win=%d win_rate=%.3f epsilon=%.4f steps=%d states=%d",
+                row.episode,
+                row.reward,
+                row.win,
+                row.win_rate,
+                row.epsilon,
+                row.steps,
+                row.q_table_states,
             )
 
-    # Save Q-table
-    agent.save(os.path.join(run_dir, "q_table.pkl"))
-    print(f"\nQ-table saved ({q_stats['n_states']} states)")
+        if config.checkpoint_every > 0 and episode % config.checkpoint_every == 0:
+            agent.save(config.artifacts_dir / "checkpoints" / f"q_agent_ep_{episode}.pkl")
 
-    # Generate plots
-    generate_plots(run_dir)
+    agent.save(config.artifacts_dir / "q_agent_final.pkl")
+    logger.info("Training finished. Artifacts saved to %s", config.artifacts_dir)
 
-    # Final eval
-    print("\n── Final Evaluation ──")
-    final_metrics = evaluate(env, agent, n_episodes=100, seed=42)
-    for k, v in final_metrics.items():
-        print(f"  {k}: {v:.4f}")
 
-    print(f"\nRun complete: {run_dir}/")
+def main() -> None:
+    config = parse_args()
+    train(config)
 
 
 if __name__ == "__main__":

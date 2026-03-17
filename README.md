@@ -1,221 +1,345 @@
-# Tabular RL for Battle City
+# Battle City RL: Tabular Q-Learning on a Discrete Grid
 
-Tabular Q-learning agent that learns to play a simplified [Battle City](https://en.wikipedia.org/wiki/Battle_City) (NES, 1985) on a discrete grid world.
+This repository contains a course project on **tabular reinforcement learning** in a simplified **Battle City** environment. The main objective is to study whether a **tabular Q-learning agent** can learn an effective control policy in a fully discrete grid-world setting and how its behavior changes as the environment becomes more difficult.
 
-## 1. Mathematical Formulation
+The project starts with a simpler map and then moves to a substantially more challenging third map with denser obstacles and more constrained trajectories. The results show that tabular Q-learning remains effective under increased complexity, although the learned policy becomes robust and defensive rather than fully optimal.
 
-### 1.1 Notation
+---
 
-| Symbol | Meaning |
-|--------|---------|
-| $\mathcal{S}$ | Finite set of states |
-| $\mathcal{A}$ | Finite set of actions |
-| $s_t \in \mathcal{S}$ | State at time step $t$ |
-| $a_t \in \mathcal{A}$ | Action taken at time step $t$ |
-| $r_t \in \mathbb{R}$ | Reward received after taking $a_t$ in $s_t$ |
-| $\gamma \in [0, 1)$ | Discount factor |
-| $\alpha \in (0, 1]$ | Learning rate |
-| $\varepsilon \in [0, 1]$ | Exploration rate |
-| $Q(s, a)$ | Action-value function — expected return from taking $a$ in $s$ |
-| $\pi(s)$ | Policy — mapping from states to actions |
-| $P(s' \mid s, a)$ | Transition probability |
-| $R(s, a, s')$ | Reward function |
+## Gameplay Demo
 
-### 1.2 Markov Decision Process (MDP)
+Below is a sample greedy-policy rollout after training. In the repository, it is recommended to place the animation in a dedicated media folder such as `assets/` and reference it from there.
 
-We model the game as a finite MDP $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$.
+![Winning episode demo](./imgs/q_learning_vs_enemy_rush_castle.gif)
 
-**State** $s_t$ is a tuple:
+This qualitative example complements the quantitative evaluation. It illustrates that the trained agent is able to preserve the castle, survive, and eliminate the opponent through a cautious but effective sequence of actions.
 
-$$s_t = (p_{\text{pos}},\; p_{\text{dir}},\; e_{\text{pos}},\; e_{\text{dir}},\; b) \in \mathcal{S}$$
+---
 
-where:
-- $p_{\text{pos}} \in \{0, \ldots, N-1\}$ — player cell index on the grid ($N = 81$ for 9×9)
-- $p_{\text{dir}} \in \{0, 1, 2, 3\}$ — player direction (up, right, down, left)
-- $e_{\text{pos}} \in \{0, \ldots, N-1\}$ — enemy cell index
-- $e_{\text{dir}} \in \{0, 1, 2, 3\}$ — enemy direction
-- $b \in \{0, 1\}$ — whether a player bullet is in flight
+## Project Goal
 
-**Action space:**
+The goal of this project is to investigate whether a **tabular Q-learning agent** can learn a meaningful and effective policy in a simplified Battle City task represented as a discrete \(9 \times 9\) grid.
 
-$$\mathcal{A} = \{\text{noop},\; \text{up},\; \text{right},\; \text{down},\; \text{left},\; \text{shoot}\}, \quad |\mathcal{A}| = 6$$
+The study is designed around two main questions:
 
-**State space size:**
+1. Can a purely tabular method solve a nontrivial control problem in a tactical grid environment?
+2. How does the learned behavior change when moving from an easy map to a harder one?
 
-$$|\mathcal{S}| = N \times 4 \times N \times 4 \times 2 = 81 \times 4 \times 81 \times 4 \times 2 = 209{,}952$$
+The emphasis of the project is not on deep reinforcement learning, but on a **clean tabular formulation**, reproducible experiments, and interpretable evaluation metrics.
 
-In practice, only reachable states are visited. The trained agent discovers $\approx 77{,}000$ states.
+---
 
-### 1.3 Markov Property Justification
+## Environment Formulation
 
-The Markov property requires that the future depends only on the current state, not on history:
+The environment is modeled as a finite Markov decision process
 
-$$P(s_{t+1} \mid s_t, a_t, s_{t-1}, a_{t-1}, \ldots) = P(s_{t+1} \mid s_t, a_t)$$
+\[
+(\mathcal{S}, \mathcal{A}, P, R, \gamma),
+\]
 
-Our state $s_t$ satisfies this because it captures all information needed to determine the next state:
+where the state is represented as
 
-1. **Tank positions and directions** — fully determine where each tank is and which way it faces. Movement is deterministic given position + direction.
-2. **Bullet flag** — determines whether the player can shoot (at most 1 bullet in flight). Since bullets move 1 cell/step in a fixed direction and are destroyed on collision, their trajectory is deterministic given the grid.
-3. **Grid** — brick walls can be destroyed, but the grid is implicitly determined by the sequence of bullet impacts, which are tracked through the game mechanics within each step.
+\[
+s_t = (p_{\text{pos}}, p_{\text{dir}}, e_{\text{pos}}, e_{\text{dir}}, b) \in \mathcal{S}.
+\]
 
-The enemy AI introduces stochasticity (random direction changes with probability 0.3), which makes the transition function $P(s' \mid s, a)$ probabilistic — but it still depends only on the current state, not on history. This is the standard stochastic MDP setting.
+Here:
 
-> **Note on discretization:** The original Battle City has continuous pixel-level movement (tanks move 2px/tick on a 416×416 pixel field). We discretize to a 9×9 grid where tanks occupy exactly one cell and move one cell per step. This makes the state space finite and tractable for tabular methods, at the cost of losing sub-cell resolution.
+- \(p_{\text{pos}}\) is the player tank position,
+- \(p_{\text{dir}}\) is the player tank direction,
+- \(e_{\text{pos}}\) is the enemy tank position,
+- \(e_{\text{dir}}\) is the enemy tank direction,
+- \(b \in \{0,1\}\) indicates whether a player bullet is currently in flight.
 
-### 1.4 Objective
+The action space is
 
-We maximize the expected discounted return:
+\[
+\mathcal{A} =
+\{
+\text{noop},\text{up},\text{right},\text{down},\text{left},\text{shoot}
+\},
+\qquad |\mathcal{A}| = 6.
+\]
 
-$$G_t = \sum_{k=0}^{\infty} \gamma^k \, r_{t+k+1}$$
+For a \(9 \times 9\) grid, the tabular state space size is
 
-The optimal action-value function satisfies the Bellman optimality equation:
+\[
+|\mathcal{S}| = 81 \cdot 4 \cdot 81 \cdot 4 \cdot 2 = 209{,}952.
+\]
 
-$$Q^{\ast}(s, a) = \mathbb{E}\left[ r + \gamma \max_{a'} Q^{\ast}(s', a') \;\middle|\; s, a \right]$$
+The agent optimizes the discounted return
 
-### 1.5 Q-Learning Update
+\[
+G_t = \sum_{k=0}^{\infty} \gamma^k r_{t+k+1}.
+\]
 
-Q-learning is an off-policy TD(0) method. After observing transition $(s_t, a_t, r_t, s_{t+1})$:
+---
 
-$$Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha \underbrace{\left[ r_t + \gamma \max_{a'} Q(s_{t+1}, a') - Q(s_t, a_t) \right]}_{\delta_t \;(\text{TD error})}$$
+## Learning Algorithm
 
-We track two key quantities during training:
+The project uses **tabular Q-learning** with an \(\varepsilon\)-greedy exploration strategy.
 
-- **TD error**: $|\delta_t| = |r_t + \gamma \max_{a'} Q(s_{t+1}, a') - Q(s_t, a_t)|$ — analogous to loss in deep RL
-- **Q-value delta**: $|\alpha \cdot \delta_t|$ — the actual magnitude of each update, analogous to gradient norm
+The Bellman optimality equation for the action-value function is
 
-Both should decrease as the Q-table converges.
+\[
+Q^*(s,a) = \mathbb{E}\left[r + \gamma \max_{a'} Q^*(s',a') \mid s,a\right].
+\]
 
-### 1.6 Exploration: $\varepsilon$-Greedy Policy
+The Q-learning update rule is
 
-$$\pi(a \mid s) = \begin{cases} 1 - \varepsilon + \frac{\varepsilon}{|\mathcal{A}|} & \text{if } a = \arg\max_{a'} Q(s, a') \\ \frac{\varepsilon}{|\mathcal{A}|} & \text{otherwise} \end{cases}$$
+\[
+Q(s_t,a_t)
+\leftarrow
+Q(s_t,a_t)
++
+\alpha
+\Bigl[
+r_t + \gamma \max_{a'}Q(s_{t+1},a') - Q(s_t,a_t)
+\Bigr].
+\]
 
-$\varepsilon$ decays linearly from 1.0 to 0.01 over 80% of training episodes.
+Exploration is performed using an \(\varepsilon\)-greedy policy, so the agent balances exploitation of learned high-value actions with continued state-space exploration.
 
-### 1.7 Reward Function
+---
 
-| Event | $r$ |
-|-------|-----|
-| Kill enemy | $+100$ |
-| Player killed | $-100$ |
-| Castle destroyed | $-200$ |
-| Each timestep | $-0.1$ |
+## Reward Design
 
-Episode terminates when player dies, castle is destroyed, enemy is killed, or 500 steps are reached.
+The reward structure is intentionally simple and task-oriented:
 
-### 1.8 Convergence
+- **+100** for destroying the enemy,
+- **-100** for player death,
+- **-200** for castle destruction,
+- **-0.1** per time step.
 
-Q-learning converges to $Q^{\ast}$ under the following conditions (Watkins & Dayan, 1992):
+This reward shaping encourages efficient victory, penalizes catastrophic failure, and discourages excessively long episodes.
 
-1. All state-action pairs are visited infinitely often — guaranteed by $\varepsilon$-greedy with $\varepsilon > 0$
-2. Learning rate satisfies $\sum_t \alpha_t = \infty$ and $\sum_t \alpha_t^2 < \infty$ — we use constant $\alpha = 0.1$ which works in practice for finite MDPs
-3. The MDP has bounded rewards — our rewards are in $[-200, +100]$
+Episodes terminate when one of the following conditions is met:
 
-## 2. Repository Structure
+- the player is destroyed,
+- the enemy is destroyed,
+- the castle is destroyed,
+- the maximum number of steps is reached.
 
+---
+
+## Evaluation Protocol
+
+To make policy comparison more informative than using return alone, the project includes **reward-independent evaluation**. The following metrics are reported:
+
+- **Win Rate**
+- **Survival Rate**
+- **Castle Survival Rate**
+- **Average Episode Length**
+- **Shot Accuracy**
+- **Exploration Coverage**
+- **Average Score**
+- **Average Return**
+
+This evaluation design makes it possible to distinguish between policies that win often, survive often, protect the base well, act efficiently, or simply avoid losing without actively finishing the task.
+
+---
+
+## Baselines
+
+The learned Q-learning agent is compared against the following baselines:
+
+- **Random Policy**  
+  A completely uninformed policy that samples actions uniformly at random.
+
+- **Pseudo\_bot\_lag5**  
+  A lagged pseudo-agent based on an earlier checkpoint of the learned policy. This baseline is useful because it measures whether the final policy is genuinely better than its own previous versions.
+
+---
+
+## Results on the Third Map
+
+The most important experiment in this repository was conducted on the **third map**, which is substantially more difficult than the first one due to denser obstacles and tighter movement corridors.
+
+The final results were:
+
+| Method | Type | Max Score | Average Score | Average Return | Win Rate | Survival Rate | Castle Survival | Average Episode Length | Average Shots Fired | Shot Accuracy | Exploration Coverage |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| q_learning | trained_agent | 200.0 | 100.10 | 53.19 | 0.53 | 0.99 | 1.00 | 463.48 | 1.07 | 0.495 | 0.068 |
+| pseudo_bot_lag5 | bot_policy | 200.0 | 77.00 | 26.80 | 0.42 | 0.99 | 1.00 | 572.65 | 0.85 | 0.494 | 0.071 |
+| random_policy | bot_policy | 270.0 | -76.25 | -66.04 | 0.12 | 0.24 | 0.88 | 137.79 | 22.32 | 0.006 | 0.315 |
+
+---
+
+## Training Diagnostics Gallery
+
+The following plots summarize the learning process. They show that reward improves substantially, while the learned policy becomes more stable and more selective.
+
+### Reward and episode statistics
+
+![Episode reward](./imgs/reward.png)
+![Episode length](./imgs/episode_length.png)
+![Average score](./imgs/eval_average_score.png)
+
+### Temporal-difference learning dynamics
+
+![TD error](./imgs/mean_td_error.png)
+![Q delta](./imgs/mean_q_delta.png)
+![Q statistics](./imgs/q_stats.png)
+
+### Exploration diagnostics
+
+![Epsilon](./imgs/epsilon.png)
+![Visited states](./imgs/n_states.png)
+![State-action coverage](./imgs/state_action_coverage.png)
+
+---
+
+## Evaluation Metrics Gallery
+
+These figures illustrate the behavior of the greedy policy during periodic evaluation on the hard map.
+
+![Win rate](./imgs/eval_win_rate.png)
+![Survival rate](./imgs/eval_survival_rate.png)
+![Shot accuracy](./imgs/eval_shot_accuracy.png)
+![Exploration coverage](./imgs/eval_exploration_coverage.png)
+
+---
+
+## Interpretation of the Results
+
+The experiments on the third map show that **tabular Q-learning does not solve the task perfectly, but it clearly learns a strong and meaningful policy**.
+
+Several conclusions follow from the results.
+
+First, the Q-learning agent is **substantially better than random behavior**. It achieves a much higher win rate, survives almost all episodes, protects the castle perfectly, and acts with dramatically higher shooting precision.
+
+Second, the final policy is also **better than its own earlier checkpoint-based version** (`pseudo_bot_lag5`). This indicates that training continues to produce real improvements rather than simply oscillating around a fixed solution.
+
+Third, the learned policy is best described as **robust, defensive, and conservative** rather than aggressive. This follows from the combination of:
+
+- very high **Survival Rate**,
+- perfect **Castle Survival**,
+- only moderate **Win Rate**,
+- and a very large **Average Episode Length**.
+
+In other words, the agent has learned how to avoid losing, but it has not yet learned how to convert every favorable situation into a fast win.
+
+Finally, the comparison with the random policy reveals one of the most interesting behavioral effects in the project. The trained agent fires on average only about **1 shot per episode**, yet its shot accuracy is close to **0.5**. By contrast, the random baseline fires more than **22 shots per episode** and almost never hits anything. This shows that the learned policy is not based on frequent action spam. Instead, it is selective and waits for favorable tactical states.
+
+---
+
+## Main Findings
+
+The main findings of the project are:
+
+- moving from the first map to the third map substantially increases task difficulty;
+- tabular Q-learning remains effective on the harder map;
+- the learned agent clearly outperforms weak baselines;
+- the policy becomes highly reliable in terms of self-preservation and castle defense;
+- however, it remains too conservative to achieve consistently high win rates;
+- the third-map results are more realistic and scientifically more informative than the near-perfect performance on the easy map.
+
+---
+
+## Repository Structure
+
+A typical repository structure for this project is:
+
+```text
+.
+├── README.md
+├── train.py
+├── evaluate.py
+├── agent.py
+├── env.py
+├── env_adapter.py
+├── plots.py
+├── render.py
+├── 1.txt
+├── 2.txt
+├── 3.txt
+├── artifacts/
+│   ├── train_log.csv
+│   ├── eval_log.csv
+│   ├── q_table.pkl
+│   ├── battle_city_results.csv
+│   └── *.png / *.gif
+└── notebooks/
+    └── RL_tanks_fixed_trained_v2_merged_qlearning_bots.ipynb
 ```
-tanks-rl/
-├── lib/
-│   ├── env.py            # BattleCityEnv — gymnasium environment (9×9 grid)
-│   ├── agent.py          # QLearningAgent — tabular Q-learning
-│   ├── evaluate.py       # Reward-independent evaluation metrics
-│   └── plots.py          # Training & eval plot generation
-├── levels/
-│   ├── 1.txt             # Open arena (easy)
-│   ├── 2.txt             # Corridors and cover (medium)
-│   └── 3.txt             # Dense obstacles (hard)
-├── train.py              # Entry point: train agent, log metrics, generate plots
-├── render.py             # Entry point: visualize trained agent with pygame
-├── runs/                 # Auto-created per training run
-│   └── <run_name>/       # e.g. "bold_curie"
-│       ├── config.json   # Hyperparameter snapshot
-│       ├── q_table.pkl   # Trained Q-table
-│       ├── train_log.csv # Per-episode: reward, TD error, Q-delta, epsilon, ...
-│       ├── eval_log.csv  # Periodic eval: win rate, accuracy, coverage, ...
-│       └── plots/        # Generated PNG plots
-└── requirements.txt
-```
 
-### Key files
+---
 
-| File | Purpose |
-|------|---------|
-| `lib/env.py` | Gymnasium environment. Loads a 9×9 level, runs game logic (movement, bullets, collisions, enemy AI), encodes state as a tuple, computes rewards. |
-| `lib/agent.py` | Q-learning agent. Maintains a `defaultdict` Q-table, epsilon-greedy action selection, tracks TD error and Q-delta per update. |
-| `lib/evaluate.py` | Runs 100 greedy episodes and computes reward-independent metrics: win rate, survival rate, castle survival, kill time, shot accuracy, exploration coverage. |
-| `lib/plots.py` | Reads CSV logs, generates 11 plots: reward curve, win rate, Q-value stats (mean/max/std), Q-delta, TD error, epsilon, state coverage, episode length, eval dashboard. |
-| `train.py` | Parses CLI args, creates a uniquely-named run directory, trains the agent, logs everything, runs periodic evals, saves Q-table and plots. |
-| `render.py` | Loads a trained Q-table and plays episodes with pygame rendering. |
+## How to Run
 
-## 3. Evaluation Metrics
-
-All metrics are reward-independent and comparable across runs:
-
-| Metric | Description |
-|--------|-------------|
-| Win rate | Fraction of episodes where agent kills the enemy |
-| Survival rate | Fraction of episodes where agent is alive at termination |
-| Castle survival rate | Fraction of episodes where castle is intact |
-| Avg episode length | Mean steps per episode (lower = more efficient) |
-| Kill time | Mean steps to kill enemy (winning episodes only) |
-| Shot accuracy | Kills / total shots fired |
-| Exploration coverage | Fraction of walkable cells visited per episode |
-
-## 4. Training Observability
-
-Console output every N episodes:
-```
-Ep  5000 | WinRate: 0.29 | AvgReward: -105.7 | AvgLen:   42 | TDErr: 2.472 | QDelta: 0.247 | States: 36219 | ε: 0.876
-```
-
-Plots generated after training:
-1. **Episode reward** — rolling average over 1000 episodes
-2. **Win rate** — from periodic eval, should increase
-3. **Q-value mean / max / std** — tracks value scale and detects divergence
-4. **Q-value delta** — mean $|\alpha \cdot \delta_t|$ per episode (grad norm analog), should decrease
-5. **TD error** — mean $|\delta_t|$ per episode (loss analog), should decrease
-6. **Epsilon** — exploration rate decay curve
-7. **State coverage** — unique states discovered over time
-8. **Episode length** — should decrease as agent becomes more efficient
-9. **Eval dashboard** — multi-panel plot of all eval metrics
-
-## 5. Usage
-
-### Install
+### 1. Train the agent
 
 ```bash
-uv venv .venv --python 3.12
-source .venv/bin/activate
-uv pip install -r requirements.txt
+python train.py --episodes 2000 --map 3
 ```
 
-### Train
+### 2. Evaluate the trained agent
 
 ```bash
-python train.py                                    # defaults: 50K episodes, level 1
-python train.py --episodes 100000 --level levels/2.txt --alpha 0.05
-python train.py --run-name my_experiment           # custom run name
+python evaluate.py --q-table artifacts/q_table.pkl --map 3
 ```
 
-### Visualize
+### 3. Render gameplay
 
 ```bash
-python render.py runs/<run_name>
-python render.py runs/<run_name> --fps 3 --episodes 20
+python render.py --q-table artifacts/q_table.pkl --map 3
 ```
 
-### Compare runs
+### 4. Generate plots
 
-Eval logs are in `runs/<name>/eval_log.csv` — compare final rows across runs.
+```bash
+python plots.py --train-log artifacts/train_log.csv --eval-log artifacts/eval_log.csv
+```
 
-## 6. Results
+---
 
-Training on level 1, 50K episodes:
+## Logged Training Diagnostics
 
-| Metric | Value |
-|--------|-------|
-| Win rate | **96%** |
-| Survival rate | 97% |
-| Castle survival | 98% |
-| Avg episode length | 24 steps |
-| Shot accuracy | 27% |
-| Q-table states | 77,105 |
+The project tracks multiple training diagnostics to make learning behavior interpretable:
+
+- episode reward,
+- TD error,
+- Q-value update magnitude,
+- mean / max / std of Q-values,
+- epsilon,
+- visited states,
+- state-action coverage,
+- episode length.
+
+These diagnostics are helpful for analyzing whether the training process is converging, still exploring, or continuing to substantially modify the value function.
+
+---
+
+## Current Limitations
+
+Although the final policy on the third map is strong, the study also reveals several limitations:
+
+- the policy is not fully optimal;
+- episode lengths remain large;
+- the win rate is still far from \(1.0\);
+- the learned strategy appears more defensive than decisive;
+- TD error and Q-delta do not yet indicate full convergence by episode 2000.
+
+These limitations are expected in a difficult environment with a large tabular state space.
+
+---
+
+## Future Work
+
+Several improvements can make the project stronger:
+
+- train on multiple random seeds and report mean \(\pm\) standard deviation;
+- add stronger scripted baselines such as attack-oriented and defense-oriented bots;
+- refine the reward to encourage faster enemy elimination;
+- add penalties for inactivity or excessively long episodes;
+- generate GIFs of both successful and failure cases;
+- compare behavior across all three maps;
+- investigate whether better state abstraction improves the tabular method.
+
+---
+
+## Conclusion
+
+This project demonstrates that **tabular Q-learning is sufficient to learn a nontrivial and tactically competent policy** in a simplified Battle City environment. On the difficult third map, the learned agent does not achieve perfect control, but it becomes highly reliable in survival and base defense while still winning substantially more often than baseline policies.
+
+From a reinforcement learning perspective, this makes the project more convincing rather than less. On the easy map, the method approached near-perfect performance. On the hard map, the method remains clearly effective, but its limitations become visible. As a result, the final outcome provides a realistic and academically meaningful picture of what a tabular RL method can and cannot achieve in a structured tactical environment.
