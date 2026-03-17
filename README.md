@@ -33,61 +33,59 @@ The emphasis of the project is not on deep reinforcement learning, but on a **cl
 
 The environment is modeled as a finite Markov decision process
 
-\[
-(\mathcal{S}, \mathcal{A}, P, R, \gamma),
-\]
+$$
+(\mathcal{S}, \mathcal{A}, P, R, \gamma)
+$$
 
 where the state is represented as
 
-\[
+$$
 s_t = (p_{\text{pos}}, p_{\text{dir}}, e_{\text{pos}}, e_{\text{dir}}, b) \in \mathcal{S}.
-\]
+$$
 
 Here:
 
-- \(p_{\text{pos}}\) is the player tank position,
-- \(p_{\text{dir}}\) is the player tank direction,
-- \(e_{\text{pos}}\) is the enemy tank position,
-- \(e_{\text{dir}}\) is the enemy tank direction,
-- \(b \in \{0,1\}\) indicates whether a player bullet is currently in flight.
+- $p_{\text{pos}}$ is the player tank position,
+- $p_{\text{dir}}$ is the player tank direction,
+- $e_{\text{pos}}$ is the enemy tank position,
+- $e_{\text{dir}}$ is the enemy tank direction,
+- $b \in \{0,1\}$ indicates whether a player bullet is currently in flight.
 
 The action space is
 
-\[
+$$
 \mathcal{A} =
 \{
-\text{noop},\text{up},\text{right},\text{down},\text{left},\text{shoot}
+\text{noop}, \text{up}, \text{right}, \text{down}, \text{left}, \text{shoot}
 \},
 \qquad |\mathcal{A}| = 6.
-\]
+$$
 
-For a \(9 \times 9\) grid, the tabular state space size is
+For a $9 \times 9$ grid, the tabular state space size is
 
-\[
+$$
 |\mathcal{S}| = 81 \cdot 4 \cdot 81 \cdot 4 \cdot 2 = 209{,}952.
-\]
+$$
 
 The agent optimizes the discounted return
 
-\[
+$$
 G_t = \sum_{k=0}^{\infty} \gamma^k r_{t+k+1}.
-\]
-
----
+$$
 
 ## Learning Algorithm
 
-The project uses **tabular Q-learning** with an \(\varepsilon\)-greedy exploration strategy.
+The project uses **tabular Q-learning** with an $\varepsilon$-greedy exploration strategy.
 
 The Bellman optimality equation for the action-value function is
 
-\[
+$$
 Q^*(s,a) = \mathbb{E}\left[r + \gamma \max_{a'} Q^*(s',a') \mid s,a\right].
-\]
+$$
 
 The Q-learning update rule is
 
-\[
+$$
 Q(s_t,a_t)
 \leftarrow
 Q(s_t,a_t)
@@ -96,7 +94,7 @@ Q(s_t,a_t)
 \Bigl[
 r_t + \gamma \max_{a'}Q(s_{t+1},a') - Q(s_t,a_t)
 \Bigr].
-\]
+$$
 
 Exploration is performed using an \(\varepsilon\)-greedy policy, so the agent balances exploitation of learned high-value actions with continued state-space exploration.
 
@@ -267,25 +265,41 @@ A typical repository structure for this project is:
 
 ## How to Run
 
-### 1. Train the agent
+### 1. Install dependencies
 
 ```bash
-python train.py --episodes 2000 --map 3
+pip install -r requirements.txt
 ```
 
-### 2. Evaluate the trained agent
+### 2. Training
+
+```bash
+python train.py \
+  --level-map-path levels/level_3.txt \
+  --episodes 2000 \
+  --alpha 0.15 \
+  --gamma 0.99 \
+  --epsilon 1.0 \
+  --epsilon-min 0.05 \
+  --epsilon-decay 0.9995 \
+  --seed 42 \
+  --state-mode tuple \
+  --artifacts-dir artifacts
+```
+
+### 3. Evaluate the trained agent
 
 ```bash
 python evaluate.py --q-table artifacts/q_table.pkl --map 3
 ```
 
-### 3. Render gameplay
+### 4. Render gameplay
 
 ```bash
 python render.py --q-table artifacts/q_table.pkl --map 3
 ```
 
-### 4. Generate plots
+### 5. Generate plots
 
 ```bash
 python plots.py --train-log artifacts/train_log.csv --eval-log artifacts/eval_log.csv
